@@ -5,12 +5,11 @@ Handles document retrieval and context management for company knowledge
 
 import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import logging
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
@@ -20,29 +19,71 @@ class RAGEngine:
     """
     Retrieval-Augmented Generation engine for company knowledge base.
     Loads markdown files, creates vector embeddings, and retrieves relevant context.
+    Includes error handling for embedding and search operations.
+    Supports multiple embeddings providers: OpenAI, HuggingFace.
     """
 
-    def __init__(self, github_token: Optional[str] = None, knowledge_file: str = "company_info.md"):
+    def __init__(self, knowledge_file: str = "company_info.md", timeout: int = 30):
         """
-        Initialize RAG Engine.
+        Initialize RAG Engine with available embeddings provider.
 
         Args:
-            github_token: GitHub token for GitHub Models API
             knowledge_file: Path to markdown file containing company information
-        """
-        self.github_token = github_token or os.getenv("GITHUB_TOKEN")
-        if not self.github_token:
-            raise ValueError("GITHUB_TOKEN not provided and not in environment variables")
+            timeout: Timeout for API calls in seconds
 
+        Raises:
+            ValueError: If no embeddings provider is available
+        """
         self.knowledge_file = knowledge_file
-        # Use GitHub Models embeddings endpoint
-        self.embeddings = OpenAIEmbeddings(
-            api_key=self.github_token,
-            base_url="https://models.githubusercontent.com/",
-            model="text-embedding-3-small",
-        )
+        self.timeout = timeout
+        self.embeddings = None
+        
+        # Try to initialize embeddings with fallback chain
+        self._init_embeddings()
+        
+        if not self.embeddings:
+            raise ValueError(
+                "No embeddings provider available. "
+                "Please set OPENAI_API_KEY environment variable or install sentence-transformers."
+            )
+        
         self.vector_store = None
         self._load_knowledge_base()
+
+    def _init_embeddings(self) -> None:
+        """
+        Initialize embeddings provider with fallback chain.
+        Tries: OpenAI → HuggingFace local embeddings
+        """
+        # Try OpenAI API first
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            try:
+                from langchain_openai import OpenAIEmbeddings
+                self.embeddings = OpenAIEmbeddings(
+                    api_key=openai_key,
+                    model="text-embedding-3-small",
+                    request_timeout=self.timeout,
+                )
+                logger.info("Initialized embeddings with OpenAI API")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to initialize OpenAI embeddings: {e}")
+        
+        # Fall back to HuggingFace embeddings (free, local)
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings
+            self.embeddings = HuggingFaceEmbeddings(
+                model_name="all-MiniLM-L6-v2",
+                model_kwargs={"device": "cpu"},
+            )
+            logger.info("Initialized embeddings with HuggingFace (all-MiniLM-L6-v2)")
+            return
+        except Exception as e:
+            logger.warning(f"Failed to initialize HuggingFace embeddings: {e}")
+        
+        # If both fail, log error (will be caught in __init__)
+        logger.error("No embeddings provider available - OpenAI API and HuggingFace both failed")
 
     def _load_knowledge_base(self) -> None:
         """Load company_info.md and create vector embeddings."""
@@ -89,9 +130,9 @@ class RAGEngine:
         self.vector_store = FAISS.from_documents(documents, self.embeddings)
         logger.info("Vector store created successfully")
 
-    def retrieve_context(self, query: str, top_k: int = 3) -> tuple[List[str], List[float]]:
+    def retrieve_context(self, query: str, top_k: int = 3) -> Tuple[List[str], List[float]]:
         """
-        Retrieve relevant chunks from knowledge base.
+        Retrieve relevant chunks from knowledge base with error handling.
 
         Args:
             query: User query/question
@@ -104,14 +145,19 @@ class RAGEngine:
             logger.error("Vector store not initialized")
             return [], []
 
-        # Similarity search with scores
-        results = self.vector_store.similarity_search_with_score(query, k=top_k)
+        try:
+            # Similarity search with scores
+            results = self.vector_store.similarity_search_with_score(query, k=top_k)
 
-        chunks = [doc.page_content for doc, score in results]
-        scores = [score for doc, score in results]
+            chunks = [doc.page_content for doc, score in results]
+            scores = [score for doc, score in results]
 
-        logger.debug(f"Retrieved {len(chunks)} chunks for query: {query}")
-        return chunks, scores
+            logger.debug(f"Retrieved {len(chunks)} chunks for query: {query}")
+            return chunks, scores
+        
+        except Exception as e:
+            logger.error(f"Error retrieving context from vector store: {e}")
+            return [], []
 
     def format_context(self, query: str, top_k: int = 3) -> str:
         """

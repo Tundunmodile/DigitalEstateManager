@@ -253,12 +253,26 @@ main.main {
     background-color: currentColor;
 }
 
+.message-timestamp {
+    font-size: var(--font-size-sm);
+    color: var(--color-gray-medium);
+    margin-top: var(--spacing-xs);
+    opacity: 0.7;
+}
+
 /* Loading Indicator */
 .message.loading .message-content {
     display: flex;
     gap: var(--spacing-sm);
     align-items: center;
     padding: var(--spacing-md) var(--spacing-lg);
+}
+
+.typing-indicator-text {
+    color: var(--color-gold);
+    font-size: var(--font-size-sm);
+    font-style: italic;
+    margin-right: var(--spacing-sm);
 }
 
 .typing-dot {

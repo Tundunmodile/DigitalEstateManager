@@ -5,6 +5,7 @@ Provides internet search capabilities for the chatbot
 
 import os
 import logging
+import time
 from typing import List, Dict, Optional
 import asyncio
 
@@ -19,17 +20,22 @@ logger = logging.getLogger(__name__)
 class WebSearchEngine:
     """
     Web search engine using Tavily API.
-    Handles internet searches for non-company queries.
+    Handles internet searches for non-company queries with retry logic and error handling.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, max_retries: int = 3, timeout: int = 30):
         """
         Initialize Web Search Engine.
 
         Args:
             api_key: Tavily API key (uses TAVILY_API_KEY env var if not provided)
+            max_retries: Maximum number of retries for API calls
+            timeout: Timeout for API calls in seconds
         """
         self.api_key = api_key or os.getenv("TAVILY_API_KEY")
+        self.max_retries = max_retries
+        self.timeout = timeout
+        
         if not self.api_key:
             logger.warning("TAVILY_API_KEY not set. Web search will be unavailable.")
             self.client = None
@@ -47,7 +53,7 @@ class WebSearchEngine:
 
     def search(self, query: str, max_results: int = 5) -> List[Dict]:
         """
-        Execute web search using Tavily API.
+        Execute web search using Tavily API with retry logic.
 
         Args:
             query: Search query
@@ -60,37 +66,46 @@ class WebSearchEngine:
             logger.error("Web search not available - Tavily client not initialized")
             return []
 
-        try:
-            response = self.client.search(
-                query=query,
-                max_results=max_results,
-                include_answer=True,
-                include_raw_content=False,
-            )
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                response = self.client.search(
+                    query=query,
+                    max_results=max_results,
+                    include_answer=True,
+                    include_raw_content=False,
+                )
 
-            results = []
-            if response.get("answer"):
-                results.append({
-                    "type": "answer",
-                    "content": response["answer"],
-                    "source": "Web Search Summary",
-                })
+                results = []
+                if response.get("answer"):
+                    results.append({
+                        "type": "answer",
+                        "content": response["answer"],
+                        "source": "Web Search Summary",
+                    })
 
-            for result in response.get("results", [])[:max_results]:
-                results.append({
-                    "type": "result",
-                    "title": result.get("title", ""),
-                    "url": result.get("url", ""),
-                    "snippet": result.get("content", ""),
-                    "source": result.get("source", ""),
-                })
+                for result in response.get("results", [])[:max_results]:
+                    results.append({
+                        "type": "result",
+                        "title": result.get("title", ""),
+                        "url": result.get("url", ""),
+                        "snippet": result.get("content", ""),
+                        "source": result.get("source", ""),
+                    })
 
-            logger.debug(f"Web search returned {len(results)} results for: {query}")
-            return results
+                logger.debug(f"Web search returned {len(results)} results for: {query}")
+                return results
 
-        except Exception as e:
-            logger.error(f"Web search error: {str(e)}")
-            return []
+            except Exception as e:
+                last_error = e
+                if attempt < self.max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    logger.warning(f"Web search attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Web search failed after {self.max_retries} attempts: {e}")
+        
+        return []
 
     def format_results(self, results: List[Dict]) -> str:
         """

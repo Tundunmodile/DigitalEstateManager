@@ -124,6 +124,13 @@ class ApexChatbot {
 
         messageDiv.appendChild(contentDiv);
 
+        // Add timestamp
+        const timestamp = this.formatTimestamp(new Date());
+        const timeElement = document.createElement('div');
+        timeElement.className = 'message-timestamp';
+        timeElement.textContent = timestamp;
+        messageDiv.appendChild(timeElement);
+
         // Add source badge if bot message with source
         if (role === 'bot' && source && source !== 'error') {
             const sourceDiv = document.createElement('div');
@@ -140,6 +147,12 @@ class ApexChatbot {
 
         this.messageContainer.appendChild(messageDiv);
         this.scrollToBottom();
+    }
+
+    formatTimestamp(date) {
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        return `${hours}:${minutes}`;
     }
 
     formatText(text) {
@@ -174,6 +187,7 @@ class ApexChatbot {
         const loadingHtml = `
             <div class="message loading bot">
                 <div class="message-content">
+                    <span class="typing-indicator-text">typing</span>
                     <div class="typing-dot"></div>
                     <div class="typing-dot"></div>
                     <div class="typing-dot"></div>
