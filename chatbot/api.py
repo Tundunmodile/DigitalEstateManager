@@ -142,6 +142,46 @@ def create_app(
             logger.error(f"Clear history endpoint error: {str(e)}")
             return jsonify({"error": "Internal server error"}), 500
 
+    @app.route("/api/status", methods=["GET"])
+    @require_chatbot
+    def get_status():
+        """Get chatbot and system status including circuit breaker states."""
+        try:
+            status = {
+                "service": "Apex Residences Chatbot",
+                "status": "healthy",
+                "conversation_id": chatbot.conversation_id,
+                "persistence_enabled": chatbot.enable_persistence,
+                "tools_enabled": chatbot.tool_manager is not None,
+                "circuit_breakers": {
+                    "anthropic_api": chatbot.anthropic_breaker.get_status(),
+                    "tavily_api": chatbot.tavily_breaker.get_status(),
+                }
+            }
+            return jsonify(status), 200
+        except Exception as e:
+            logger.error(f"Status endpoint error: {str(e)}")
+            return jsonify({"error": "Internal server error"}), 500
+
+    @app.route("/api/tools", methods=["GET"])
+    @require_chatbot
+    def get_tools():
+        """Get available tools."""
+        try:
+            if not chatbot.tool_manager:
+                return jsonify({"tools": [], "message": "Tools not available"}), 200
+            
+            tools = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                } for tool in chatbot.tool_manager.tools.values()
+            ]
+            return jsonify({"tools": tools, "count": len(tools)}), 200
+        except Exception as e:
+            logger.error(f"Tools endpoint error: {str(e)}")
+            return jsonify({"error": "Internal server error"}), 500
+
     @app.errorhandler(404)
     def not_found(error):
         """Handle 404 errors."""

@@ -330,6 +330,68 @@ search = WebSearchEngine(
 - Consider reducing `max_history` to lower token usage
 - First embeddings initialization may be slow while downloading HuggingFace model
 
+## 📚 Complete Documentation
+
+This project includes comprehensive documentation for different use cases:
+
+### [API Documentation](API_DOCUMENTATION.md)
+Complete REST API reference including:
+- All 6 endpoints with detailed examples
+- Request/response formats and status codes
+- Error handling guide
+- Example clients (Python, JavaScript)
+- CORS configuration
+- Rate limiting recommendations
+- Performance considerations
+
+**Quick Links:**
+- `POST /api/chat` - Send message to chatbot
+- `GET /api/health` - Health check
+- `GET /api/status` - Circuit breaker and feature status
+- `GET /api/tools` - List available tools
+- `GET /api/history` - Get conversation history
+- `DELETE /api/history` - Clear conversation
+
+### [Deployment Guide](DEPLOYMENT_GUIDE.md)
+Complete deployment instructions for all environments:
+- **Development**: Local setup with virtual environment
+- **Staging**: Docker and Docker Compose setup
+- **Production**:
+  - AWS EC2 with Nginx reverse proxy
+  - Kubernetes deployment
+  - Heroku deployment
+- Environment configuration and secrets management
+- Database setup (SQLite, PostgreSQL)
+- SSL/TLS certificate setup (Let's Encrypt)
+- Systemd service configuration
+- Monitoring and logging setup
+- Security best practices
+- Backup and rollback procedures
+
+### [Troubleshooting Guide](TROUBLESHOOTING.md)
+Comprehensive troubleshooting for all common issues:
+- Quick diagnostics and status checks
+- Installation & setup problems (20+ scenarios)
+- API and chat issues (8+ scenarios)
+- Database problems (3+ scenarios)
+- Performance optimization
+- Web interface issues
+- Circuit breaker debugging
+- Deployment troubleshooting
+- Common error messages explained
+- Performance optimization tips
+
+### Quick Reference
+
+| Topic | Location |
+|-------|----------|
+| **API Usage** | [API_DOCUMENTATION.md](API_DOCUMENTATION.md#api-usage-examples) |
+| **Deployment** | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) |
+| **Troubleshooting** | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
+| **Docker Setup** | [DEPLOYMENT_GUIDE.md#docker-container-setup](DEPLOYMENT_GUIDE.md#docker-container-setup) |
+| **Production Checklist** | [DEPLOYMENT_GUIDE.md#security-considerations](DEPLOYMENT_GUIDE.md#security-considerations) |
+| **Error Messages** | [TROUBLESHOOTING.md#common-error-messages](TROUBLESHOOTING.md#common-error-messages) |
+
 ## Development
 
 ### Running Tests
@@ -356,7 +418,18 @@ logging.basicConfig(level=logging.DEBUG)
 
 ## Recent Improvements
 
-✨ **Version 1.1.1** (Current)
+✨ **Version 1.2.0** (Current)
+- **Integrated Property Tools**: 6 tools for property search, vendor management, and maintenance scheduling
+- **Conversation Persistence**: Full database integration with SQLAlchemy for conversation history and analytics
+- **Circuit Breaker Pattern**: Service resilience with automatic recovery mechanisms
+- **Comprehensive Documentation**: 
+  - Complete API documentation with examples
+  - Detailed deployment guides for all platforms (AWS, Docker, Kubernetes, Heroku)
+  - Extensive troubleshooting guide covering 30+ scenarios
+- **System Status Endpoint**: Real-time visibility into circuit breaker states and feature availability
+- **Intent Classification**: Automatic query categorization for analytics
+
+✨ **Version 1.1.1**
 - Fixed embeddings provider configuration (removed invalid GitHub Models endpoint)
 - Implemented intelligent embeddings fallback chain: OpenAI → HuggingFace
 - Added automatic provider detection with graceful degradation
@@ -392,5 +465,14 @@ For issues or questions, contact: `hello@apexresidences.com`
 ---
 
 **Last Updated**: April 2, 2026  
-**Version**: 1.1.0  
-**Status**: Production Ready
+**Version**: 1.2.0  
+**Status**: Production Ready ✅
+
+## Documentation Status
+
+- ✅ [README.md](README.md) - Project overview and quick start
+- ✅ [API_DOCUMENTATION.md](API_DOCUMENTATION.md) - Complete API reference 
+- ✅ [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) - Deployment instructions
+- ✅ [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - Troubleshooting guide
+- ✅ [ASSESSMENT_RUBRIC_RESULTS.md](ASSESSMENT_RUBRIC_RESULTS.md) - Rubric evaluation
+- ✅ [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Recent implementations

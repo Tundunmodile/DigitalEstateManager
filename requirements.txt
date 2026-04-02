@@ -14,3 +14,20 @@ requests>=2.31.0
 sentence-transformers>=2.2.0
 faiss-cpu>=1.7.0
 
+# Testing & Quality
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-asyncio>=0.21.0
+unittest-mock>=1.5.0
+
+# Database & Persistence
+sqlalchemy>=2.0.0
+sqlite3
+
+# ML Intent Classification
+transformers>=4.30.0
+torch>=2.0.0
+
+# Utilities
+tenacity>=8.2.0
+
