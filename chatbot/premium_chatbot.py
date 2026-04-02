@@ -6,6 +6,10 @@ Handles query routing, context management, and response synthesis
 import os
 import logging
 import time
+import sys
+import warnings
+import contextlib
+from io import StringIO
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 
@@ -70,7 +74,35 @@ Always maintain a conversational tone while preserving sophistication."""
         
         # Initialize RAG Engine for company knowledge retrieval
         try:
-            self.rag_engine = RAGEngine(knowledge_file=knowledge_file)
+            # Suppress all output during initialization (OS-level file descriptor redirection)
+            # This catches all output including C library output that contextlib cannot reach
+            try:
+                # Save original file descriptors
+                saved_stdout_fd = os.dup(1)  # stdout
+                saved_stderr_fd = os.dup(2)  # stderr
+                
+                # Redirect to /dev/null
+                devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull_fd, 1)  # Redirect stdout
+                os.dup2(devnull_fd, 2)  # Redirect stderr
+                os.close(devnull_fd)
+                
+                try:
+                    # Suppress warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        self.rag_engine = RAGEngine(knowledge_file=knowledge_file)
+                finally:
+                    # Restore file descriptors
+                    os.dup2(saved_stdout_fd, 1)
+                    os.dup2(saved_stderr_fd, 2)
+                    os.close(saved_stdout_fd)
+                    os.close(saved_stderr_fd)
+                    
+            except (AttributeError, OSError):
+                # Fallback if file descriptor redirection doesn't work (e.g., on Windows)
+                self.rag_engine = RAGEngine(knowledge_file=knowledge_file)
+            
             logger.info("RAG Engine initialized successfully")
         except Exception as e:
             logger.warning(f"Failed to initialize RAG Engine: {e}. Proceeding with static knowledge.")

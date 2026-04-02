@@ -8,9 +8,24 @@ import os
 import sys
 import argparse
 import logging
+import warnings
+import io
 from pathlib import Path
+
+# Suppress HuggingFace Hub messages before any imports
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logs
+os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Avoid GPU warnings
+
 from dotenv import load_dotenv
 
+# Suppress LangChain deprecation warnings (not user-facing)
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='langchain')
+warnings.filterwarnings('ignore', message='.*HuggingFaceEmbeddings.*')
+warnings.filterwarnings('ignore', message='.*unauthenticated requests.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='huggingface_hub')
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
 
 # Load environment variables
 load_dotenv()
@@ -21,12 +36,22 @@ env_path = Path(__file__).parent / ".env"
 if env_path.exists():
     load_dotenv(env_path)
 
-# Setup logging
+# Setup logging - suppress verbose initialization messages
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Only show warnings and errors
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress verbose library logs
+logging.getLogger('langchain').setLevel(logging.ERROR)
+logging.getLogger('langchain_community').setLevel(logging.ERROR)
+logging.getLogger('langchain_huggingface').setLevel(logging.ERROR)
+logging.getLogger('transformers').setLevel(logging.ERROR)
+logging.getLogger('sentence_transformers').setLevel(logging.ERROR)
+logging.getLogger('httpx').setLevel(logging.ERROR)
+logging.getLogger('openai').setLevel(logging.ERROR)
+logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 
 
 def print_banner() -> None:
