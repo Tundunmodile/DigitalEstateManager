@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apex Residences - Premium Concierge</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="logo">APEX RESIDENCES</h1>
+                <p class="tagline">Premium Home Management Concierge</p>
+            </div>
+            <button class="clear-btn" id="clearBtn" title="Clear conversation">
+                <span class="icon">↻</span>
+            </button>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Chat Container -->
+            <div class="chat-container">
+                <div class="chat-messages" id="chatMessages">
+                    <!-- Messages will be added here -->
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="input-area">
+                <form id="chatForm" class="chat-form">
+                    <div class="input-wrapper">
+                        <input
+                            type="text"
+                            id="messageInput"
+                            class="message-input"
+                            placeholder="Ask about our services, pricing, team, or anything else..."
+                            autocomplete="off"
+                            required
+                        >
+                        <button type="submit" class="send-btn" title="Send message">
+                            <span class="icon">→</span>
+                        </button>
+                    </div>
+                </form>
+                <p class="input-hint">Press Enter to send</p>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p class="contact-info">
+                Need assistance? Contact our concierge at
+                <a href="mailto:hello@apexresidences.com">hello@apexresidences.com</a>
+                or call <a href="tel:+15553382739">+1 (555) 338-2739</a>
+            </p>
+        </footer>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
