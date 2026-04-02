@@ -1,0 +1,806 @@
+"""
+Premium Chatbot - Main Orchestrator
+Handles query routing, context management, and response synthesis
+"""
+
+import os
+import logging
+import time
+import sys
+import warnings
+import uuid
+import contextlib
+from io import StringIO
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+
+from .web_search_engine import WebSearchEngine
+from .rag_engine import RAGEngine
+from .property_database import PropertyDatabase
+from .tools import ToolManager, setup_tools
+from .circuit_breaker import CircuitBreaker
+from .database import DatabaseManager
+
+logger = logging.getLogger(__name__)
+
+
+class PremiumChatbot:
+    """
+    Premium chatbot for Apex Residences.
+    Uses Claude API for intelligent responses with conversation context.
+    Maintains conversation history for coherent multi-turn interactions.
+    """
+
+    SYSTEM_PROMPT = """You are a sophisticated and refined concierge assistant for Apex Residences, 
+a premier luxury home management service. Your communication style should be:
+
+- Professional, elegant, and concise
+- Informative without unnecessary elaboration
+- Helpful and proactive in suggesting solutions
+- Always maintaining the brand voice: luxury, discretion, excellence
+
+You have access to company information below. When answering ANY questions:
+- Ground all responses in the provided company knowledge
+- Be precise with details about services, pricing, team members, and contact information
+- Only reference information explicitly stated in the knowledge base
+- For questions not covered by company knowledge, politely decline and suggest contacting the team
+- Maintain discretion and professionalism at all times
+
+Always maintain a conversational tone while preserving sophistication."""
+
+    def __init__(
+        self,
+        tavily_api_key: Optional[str] = None,
+        max_history: int = 5,
+        knowledge_file: str = "company_info.md",
+        api_timeout: int = 30,
+        max_retries: int = 3,
+        enable_persistence: bool = True,
+        database_url: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ):
+        """
+        Initialize Premium Chatbot.
+
+        Args:
+            tavily_api_key: Tavily API key for web search
+            max_history: Maximum conversation history exchanges to maintain
+            knowledge_file: Path to markdown file with company information
+            api_timeout: Timeout for API calls in seconds
+            max_retries: Maximum number of retries for API calls
+            enable_persistence: Whether to persist conversations to database
+            database_url: Database connection URL (default: sqlite)
+            user_id: User ID for conversation tracking
+        """
+        # Initialize Anthropic client
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        if not anthropic_key:
+            raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
+        
+        from anthropic import Anthropic
+        self.client = Anthropic(api_key=anthropic_key)
+        self.model = "claude-3-haiku-20240307"
+        self.api_timeout = api_timeout
+        self.max_retries = max_retries
+        
+        # Initialize circuit breakers for API services
+        self.anthropic_breaker = CircuitBreaker(
+            name="anthropic_api",
+            failure_threshold=5,
+            recovery_timeout=60,
+        )
+        self.tavily_breaker = CircuitBreaker(
+            name="tavily_api",
+            failure_threshold=3,
+            recovery_timeout=30,
+        )
+        
+        # Initialize RAG Engine for company knowledge retrieval
+        try:
+            # Suppress all output during initialization (OS-level file descriptor redirection)
+            # This catches all output including C library output that contextlib cannot reach
+            try:
+                # Save original file descriptors
+                saved_stdout_fd = os.dup(1)  # stdout
+                saved_stderr_fd = os.dup(2)  # stderr
+                
+                # Redirect to /dev/null
+                devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull_fd, 1)  # Redirect stdout
+                os.dup2(devnull_fd, 2)  # Redirect stderr
+                os.close(devnull_fd)
+                
+                try:
+                    # Suppress warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        self.rag_engine = RAGEngine(knowledge_file=knowledge_file)
+                finally:
+                    # Restore file descriptors
+                    os.dup2(saved_stdout_fd, 1)
+                    os.dup2(saved_stderr_fd, 2)
+                    os.close(saved_stdout_fd)
+                    os.close(saved_stderr_fd)
+                    
+            except (AttributeError, OSError):
+                # Fallback if file descriptor redirection doesn't work (e.g., on Windows)
+                self.rag_engine = RAGEngine(knowledge_file=knowledge_file)
+            
+            logger.info("RAG Engine initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize RAG Engine: {e}. Proceeding with static knowledge.")
+            self.rag_engine = None
+        
+        # Load company knowledge base (as fallback)
+        self.company_knowledge = self._load_knowledge_base(knowledge_file)
+        
+        # Build complete system prompt with company knowledge
+        self.system_prompt = self._build_system_prompt()
+        
+        # Web search engine
+        self.web_search_engine = WebSearchEngine(api_key=tavily_api_key)
+        
+        # Initialize property database and tools
+        try:
+            self.property_db = PropertyDatabase()
+            self.tool_manager = ToolManager()
+            setup_tools(self.property_db, self.tool_manager)
+            logger.info(f"Initialized {len(self.tool_manager.tools)} tools")
+        except Exception as e:
+            logger.warning(f"Failed to initialize tools: {e}")
+            self.property_db = None
+            self.tool_manager = None
+        
+        # Initialize persistence layer
+        self.enable_persistence = enable_persistence
+        self.database_manager = None
+        self.conversation_id = str(uuid.uuid4())
+        self.user_id = user_id or "anonymous"
+        
+        if enable_persistence:
+            try:
+                self.database_manager = DatabaseManager(database_url=database_url)
+                self.database_manager.create_conversation(
+                    self.conversation_id,
+                    user_id=self.user_id,
+                    title=f"Conversation started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                logger.info(f"Conversation persistence enabled (id: {self.conversation_id})")
+            except Exception as e:
+                logger.warning(f"Failed to initialize database: {e}. Proceeding without persistence.")
+                self.database_manager = None
+        
+        self.max_history = max_history
+        self.conversation_history: List[Dict[str, str]] = []
+        
+        logger.info("Premium Chatbot initialized (Claude with RAG, web search, tools, and persistence)")
+
+    def _load_knowledge_base(self, knowledge_file: str) -> str:
+        """
+        Load company knowledge from markdown file.
+
+        Args:
+            knowledge_file: Path to knowledge file
+
+        Returns:
+            Content of knowledge file as string
+        """
+        # Try multiple paths
+        for candidate in [
+            knowledge_file,
+            os.path.join(os.path.dirname(__file__), "..", knowledge_file),
+            os.path.join(os.getcwd(), knowledge_file),
+        ]:
+            if os.path.exists(candidate):
+                try:
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    logger.info(f"Loaded knowledge base from {candidate}")
+                    return content
+                except Exception as e:
+                    logger.error(f"Error reading {candidate}: {e}")
+                    continue
+        
+        # If no file found, return empty string (graceful degradation)
+        logger.warning(f"Knowledge file not found, proceeding without company knowledge")
+        return ""
+
+    def _build_system_prompt(self) -> str:
+        """
+        Build complete system prompt with company knowledge.
+
+        Returns:
+            Complete system prompt including company information
+        """
+        if self.company_knowledge:
+            return f"""{self.SYSTEM_PROMPT}
+
+---
+
+## COMPANY KNOWLEDGE BASE
+
+{self.company_knowledge}
+
+---
+
+Use the above information to ground all responses. Only reference services, pricing, and team details that are explicitly mentioned above. For any questions not covered by this knowledge base, politely indicate that you don't have that information and suggest contacting the Apex Residences team."""
+        else:
+            return self.SYSTEM_PROMPT
+
+
+
+    def _call_llm(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Call the Anthropic Claude LLM with retry logic, circuit breaker, and tool support.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+
+        Returns:
+            Response text from Claude
+
+        Raises:
+            RuntimeError: If max retries exceeded or circuit is open
+        """
+        # Extract system prompt if present
+        system_prompt = None
+        api_messages = []
+        
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+            else:
+                api_messages.append(msg)
+        
+        # Default system prompt if not provided
+        if not system_prompt:
+            system_prompt = self.system_prompt
+        
+        # Prepare tools if available
+        tools = None
+        if self.tool_manager and len(self.tool_manager.tools) > 0:
+            tools = self.tool_manager.get_tools_for_claude()
+            logger.debug(f"Providing {len(tools)} tools to Claude")
+        
+        # Use circuit breaker to protect API calls
+        def make_api_call():
+            api_kwargs = {
+                "model": self.model,
+                "max_tokens": 2000,
+                "system": system_prompt,
+                "messages": api_messages,
+                "timeout": self.api_timeout,
+            }
+            
+            # Add tools if available
+            if tools:
+                api_kwargs["tools"] = tools
+            
+            response = self.client.messages.create(**api_kwargs)
+            return response
+        
+        # Retry logic with exponential backoff
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                response = self.anthropic_breaker.call(make_api_call)
+                
+                # Handle tool use in response
+                final_response = self._handle_tool_use(response, api_messages)
+                return final_response
+                
+            except Exception as e:
+                last_error = e
+                if attempt < self.max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    logger.warning(f"API call attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"API call failed after {self.max_retries} attempts")
+        
+        raise RuntimeError(f"Failed to get LLM response after {self.max_retries} attempts: {last_error}")
+
+    def _handle_tool_use(self, response, api_messages: List[Dict]) -> str:
+        """
+        Handle tool use in Claude's response.
+        Executes tools and continues conversation if needed.
+
+        Args:
+            response: Response from Claude API
+            api_messages: Current messages list to update
+
+        Returns:
+            Final text response from Claude
+        """
+        # Check if response contains tool use
+        tool_uses = [block for block in response.content if block.type == "tool_use"]
+        text_blocks = [block for block in response.content if hasattr(block, 'text')]
+        
+        if not tool_uses:
+            # No tool use, return text response
+            if text_blocks:
+                return text_blocks[0].text
+            return ""
+        
+        # Add assistant response with tool use to messages
+        api_messages.append({
+            "role": "assistant",
+            "content": response.content
+        })
+        
+        # Execute each tool and collect results
+        tool_results = []
+        for tool_use in tool_uses:
+            try:
+                logger.info(f"Executing tool: {tool_use.name} with input: {tool_use.input}")
+                result = self.tool_manager.execute_tool(tool_use.name, tool_use.input)
+                
+                # Format result for Claude
+                if "result" in result:
+                    tool_result_text = str(result["result"])
+                else:
+                    tool_result_text = str(result.get("error", "Unknown error"))
+                
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": tool_result_text
+                })
+                
+                logger.debug(f"Tool {tool_use.name} executed successfully")
+            except Exception as e:
+                logger.error(f"Error executing tool {tool_use.name}: {e}")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": f"Error executing tool: {str(e)}"
+                })
+        
+        # Add tool results to messages
+        api_messages.append({
+            "role": "user",
+            "content": tool_results
+        })
+        
+        # Call Claude again to synthesize results
+        def make_followup_call():
+            api_kwargs = {
+                "model": self.model,
+                "max_tokens": 2000,
+                "system": api_messages[0].get("content", self.system_prompt) if api_messages and api_messages[0].get("role") == "system" else self.system_prompt,
+                "messages": api_messages,
+                "timeout": self.api_timeout,
+            }
+            
+            if self.tool_manager and len(self.tool_manager.tools) > 0:
+                api_kwargs["tools"] = self.tool_manager.get_tools_for_claude()
+            
+            return self.client.messages.create(**api_kwargs)
+        
+        try:
+            followup_response = self.anthropic_breaker.call(make_followup_call)
+            
+            # Recursively handle if more tool use is needed
+            return self._handle_tool_use(followup_response, api_messages)
+        except Exception as e:
+            logger.error(f"Failed to get followup response: {e}")
+            # Return any text from original response
+            if text_blocks:
+                return text_blocks[0].text
+            return "I encountered an error while processing your request."
+
+    def _should_use_tools(self, query: str) -> bool:
+        """
+        Determine if query requires tool/function calling.
+
+        Args:
+            query: User query
+
+        Returns:
+            True if tools should be used
+        """
+        if not self.tool_manager:
+            return False
+        
+        tool_keywords = [
+            "property", "properties", "maintenance", "schedule", "vendor", "vendors",
+            "search", "find", "book", "appointment", "appointment", "upcoming",
+            "maintenance history", "inspect", "repair", "maintenance record",
+            "plumbsing", "hvac", "electrical", "roofing", "cleaning"
+        ]
+        
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in tool_keywords)
+
+    def _execute_tools(self, query: str) -> Optional[Dict[str, str]]:
+        """
+        Attempt to execute relevant tools for the query.
+
+        Args:
+            query: User query
+
+        Returns:
+            Tool results or None if no tools executed
+        """
+        if not self.tool_manager or not self._should_use_tools(query):
+            return None
+        
+        try:
+            # Simple heuristic tool detection
+            query_lower = query.lower()
+            
+            if any(x in query_lower for x in ["search property", "find property", "properties"]):
+                result = self.tool_manager.execute_tool("search_properties", {"query": query})
+                if "result" in result:
+                    return {"type": "tool_result", "content": result["result"]}
+            
+            elif any(x in query_lower for x in ["maintenance history", "maintenance records"]):
+                # Extract property ID if mentioned
+                if "prop-" in query_lower:
+                    # Simple extraction of property ID
+                    parts = query.split("prop-")
+                    prop_id = "prop-" + parts[-1].split()[0]
+                    result = self.tool_manager.execute_tool("get_maintenance_history", {"property_id": prop_id})
+                    if "result" in result:
+                        return {"type": "tool_result", "content": result["result"]}
+            
+            elif any(x in query_lower for x in ["search vendor", "find vendor"]):
+                # Try to extract category
+                if "hvac" in query_lower:
+                    category = "HVAC"
+                elif "plumbing" in query_lower:
+                    category = "Plumbing"
+                elif "electrical" in query_lower:
+                    category = "Electrical"
+                elif "roofing" in query_lower:
+                    category = "Roofing"
+                else:
+                    category = "HVAC"  # Default
+                
+                result = self.tool_manager.execute_tool("search_vendors", {"category": category})
+                if "result" in result:
+                    return {"type": "tool_result", "content": result["result"]}
+            
+            elif any(x in query_lower for x in ["schedule", "book", "appointment"]):
+                # Would need more sophisticated parsing for scheduling
+                logger.debug("Schedule request detected but needs manual parsing")
+                return None
+        
+        except Exception as e:
+            logger.error(f"Tool execution error: {e}")
+            return None
+        
+        return None
+
+    def get_response(self, user_input: str, include_source: bool = True) -> Dict[str, str]:
+        """
+        Get chatbot response to user input with RAG, web search, tools, and persistence.
+
+        Args:
+            user_input: User's question or message
+            include_source: Whether to include source attribution in response
+
+        Returns:
+            Dictionary with 'response', 'source', 'timestamp', 'context_used'
+        """
+        logger.info(f"Processing user input: {user_input[:100]}...")
+        
+        # Store message ID for persistence
+        user_message_id = str(uuid.uuid4())
+        
+        # Tool context will be set by Claude via tool use
+        # No need for manual heuristic-based tool execution anymore
+        tool_context = ""
+        
+        # Determine query type and retrieve appropriate context
+        is_company_query = self._is_company_question(user_input)
+        rag_context = ""
+        web_context = ""
+        source = "company" if is_company_query else "web"
+        
+        try:
+            if is_company_query:
+                # Retrieve from company knowledge base
+                rag_context, _ = self._retrieve_rag_context(user_input, top_k=3)
+                logger.debug(f"Retrieved RAG context for query")
+            else:
+                # Retrieve from web search
+                web_context = self._retrieve_web_search_context(user_input, max_results=5)
+                logger.debug(f"Retrieved web search context for query")
+        except Exception as e:
+            logger.error(f"Error retrieving context: {e}")
+
+        # Build messages with conversation history and retrieved context
+        messages = [{"role": "system", "content": self.system_prompt}]
+        messages.extend(self._get_history_with_relevance_filtering(user_input, max_tokens=2000))
+        
+        # Build enhanced user message with context
+        enhanced_query = self._build_context_prompt(rag_context, web_context, user_input, tool_context)
+        messages.append({"role": "user", "content": enhanced_query})
+
+        try:
+            # Get response from Claude
+            response_text = self._call_llm(messages)
+        except RuntimeError as e:
+            logger.error(f"Failed to get response: {e}")
+            response_text = "I apologize, but I'm currently unable to process your request. Please try again shortly."
+            source = "error"
+
+        # Update conversation history with original input (not enhanced)
+        self._update_history(user_input, response_text, user_message_id, source, rag_context, web_context, tool_context)
+
+        return {
+            "response": response_text,
+            "source": source,
+            "timestamp": datetime.now().isoformat(),
+            "context_used": {
+                "company_knowledge": bool(rag_context),
+                "web_search": bool(web_context),
+                "tools": bool(tool_context),
+            }
+        }
+
+    def _update_history(
+        self,
+        user_input: str,
+        assistant_response: str,
+        user_message_id: str,
+        source: str = "company",
+        rag_context: str = "",
+        web_context: str = "",
+        tool_context: str = "",
+    ) -> None:
+        """
+        Update conversation history and persist to database if enabled.
+
+        Args:
+            user_input: User message
+            assistant_response: Assistant response
+            user_message_id: Unique ID for this exchange
+            source: Response source (company, web, tools, error)
+            rag_context: RAG context used
+            web_context: Web search context used
+            tool_context: Tool execution context used
+        """
+        # Update in-memory history
+        self.conversation_history.append({"role": "user", "content": user_input})
+        self.conversation_history.append({"role": "assistant", "content": assistant_response})
+
+        # Keep only last max_history exchanges
+        if len(self.conversation_history) > self.max_history * 2:
+            self.conversation_history = self.conversation_history[-(self.max_history * 2):]
+
+        # Persist to database if enabled
+        if self.database_manager:
+            try:
+                # Store user message
+                self.database_manager.add_message(
+                    conversation_id=self.conversation_id,
+                    message_id=user_message_id,
+                    role="user",
+                    content=user_input,
+                )
+                
+                # Store assistant response
+                response_id = str(uuid.uuid4())
+                self.database_manager.add_message(
+                    conversation_id=self.conversation_id,
+                    message_id=response_id,
+                    role="assistant",
+                    content=assistant_response,
+                    source=source,
+                    context_used={
+                        "company_knowledge": bool(rag_context),
+                        "web_search": bool(web_context),
+                        "tools": bool(tool_context),
+                    }
+                )
+                
+                # Record analytics
+                self.database_manager.record_query_analytics(
+                    query_id=str(uuid.uuid4()),
+                    conversation_id=self.conversation_id,
+                    query_text=user_input,
+                    intent=self._classify_intent(user_input),
+                    source_used=source,
+                    processing_time=0.0,  # Approximate
+                )
+                
+                logger.debug(f"Persisted conversation to database")
+            except Exception as e:
+                logger.warning(f"Failed to persist to database: {e}")
+
+    def _get_context_limited_history(self) -> List[Dict[str, str]]:
+        """
+        Get conversation history with token-aware context management.
+        Prioritizes recent exchanges while managing total context window.
+
+        Returns:
+            List of message dicts suitable for API call
+        """
+        # Use recent exchanges (typically 3-5 exchanges for Haiku model)
+        max_exchanges = min(self.max_history, 3)  # More conservative for context window
+        
+        if len(self.conversation_history) > max_exchanges * 2:
+            return self.conversation_history[-(max_exchanges * 2):]
+        
+        return self.conversation_history.copy()
+
+    def _estimate_token_count(self, text: str) -> int:
+        """
+        Rough estimate of token count (assuming ~4 chars per token).
+        Used for context window management.
+
+        Args:
+            text: Text to count tokens for
+
+        Returns:
+            Approximate token count
+        """
+        return len(text) // 4
+
+    def _get_history_with_relevance_filtering(self, current_query: str, max_tokens: int = 2000) -> List[Dict[str, str]]:
+        """
+        Get conversation history with intelligent relevance filtering.
+        Keeps most relevant recent messages while staying within token limit.
+
+        Args:
+            current_query: Current user query
+            max_tokens: Maximum tokens available for history
+
+        Returns:
+            Filtered conversation history
+        """
+        if not self.conversation_history:
+            return []
+        
+        # Always keep the most recent exchange
+        filtered_history = []
+        token_count = 0
+        
+        # Iterate backwards through history (most recent first)
+        for i in range(len(self.conversation_history) - 1, -1, -1):
+            message = self.conversation_history[i]
+            message_tokens = self._estimate_token_count(message["content"])
+            
+            # Stop if we exceed token budget
+            if token_count + message_tokens > max_tokens:
+                break
+            
+            filtered_history.insert(0, message)
+            token_count += message_tokens
+        
+        logger.debug(f"Using {len(filtered_history)} messages ({token_count} tokens) from history")
+        return filtered_history
+
+    def _retrieve_rag_context(self, query: str, top_k: int = 3) -> Tuple[str, List[float]]:
+        """
+        Retrieve context from company knowledge base via RAG.
+
+        Args:
+            query: User query
+            top_k: Number of results to retrieve
+
+        Returns:
+            Tuple of (formatted_context, confidence_scores)
+        """
+        if not self.rag_engine:
+            return "", []
+        
+        try:
+            return self.rag_engine.format_context(query, top_k=top_k), [1.0] * top_k
+        except Exception as e:
+            logger.error(f"RAG retrieval error: {e}")
+            return "", []
+
+    def _retrieve_web_search_context(self, query: str, max_results: int = 5) -> str:
+        """
+        Retrieve context from web search.
+
+        Args:
+            query: Search query
+            max_results: Maximum results to return
+
+        Returns:
+            Formatted web search results
+        """
+        if not self.web_search_engine.is_available():
+            return ""
+        
+        try:
+            return self.web_search_engine.search_and_format(query, max_results=max_results)
+        except Exception as e:
+            logger.error(f"Web search error: {e}")
+            return ""
+
+    def _build_context_prompt(
+        self,
+        rag_context: str,
+        web_context: str,
+        user_query: str,
+        tool_context: str = "",
+    ) -> str:
+        """
+        Build enhanced user message with retrieved context.
+
+        Args:
+            rag_context: Company knowledge context
+            web_context: Web search context
+            user_query: Original user query
+            tool_context: Tool execution results
+
+        Returns:
+            Enhanced query string with context
+        """
+        context_parts = []
+        
+        if tool_context:
+            context_parts.append(f"**Tool Results:**\n{tool_context}")
+        
+        if rag_context:
+            context_parts.append(f"**Relevant Company Information:**\n{rag_context}")
+        
+        if web_context:
+            context_parts.append(f"**External Information:**\n{web_context}")
+        
+        if context_parts:
+            return f"{user_query}\n\n---\n\nContext to consider:\n\n" + "\n\n---\n\n".join(context_parts)
+        
+        return user_query
+
+    def _is_company_question(self, query: str) -> bool:
+        """
+        Determine if query is about company (use RAG) vs general knowledge (use web).
+
+        Args:
+            query: User question
+
+        Returns:
+            True if query is company-specific
+        """
+        company_keywords = [
+            "service", "pricing", "price", "cost", "team", "staff", "contact", "hours",
+            "availability", "fee", "package", "tier", "premium", "platinum", "elite",
+            "offer", "specialize", "background", "experience", "expertise", "how much",
+            "how many", "what service", "what do you", "do you offer", "do you provide",
+            "event planning", "property management", "concierge", "vendor", "faq",
+            "about", "philosophy", "mission", "values", "who is", "who are", "apex",
+            "residences", "vetting", "maintenance", "security", "vendor"
+        ]
+
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in company_keywords)
+
+    def _classify_intent(self, query: str) -> str:
+        """
+        Classify query intent for analytics.
+
+        Args:
+            query: User query
+
+        Returns:
+            Intent classification
+        """
+        query_lower = query.lower()
+        
+        if any(x in query_lower for x in ["property", "properties", "home", "house"]):
+            return "property_management"
+        elif any(x in query_lower for x in ["maintenance", "repair", "service"]):
+            return "maintenance"
+        elif any(x in query_lower for x in ["vendor", "contractor"]):
+            return "vendor"
+        elif any(x in query_lower for x in ["price", "pricing", "cost", "fee"]):
+            return "pricing_information"
+        elif any(x in query_lower for x in ["team", "staff", "contact"]):
+            return "team_information"
+        else:
+            return "general_knowledge"
+
+    def clear_history(self) -> None:
+        """Clear conversation history."""
+        self.conversation_history = []
+        logger.info("Conversation history cleared")
+
+    def get_history(self) -> List[Dict[str, str]]:
+        """Get current conversation history."""
+        return self.conversation_history.copy()
